@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Secure Login</title>
+    <style>
+      body {
+        font-family: Arial;
+        margin: 40px;
+      }
+      .box {
+        max-width: 360px;
+        margin: 0 auto;
+        padding: 20px;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+      }
+      label {
+        display: block;
+        margin-top: 10px;
+      }
+      input {
+        width: 100%;
+        padding: 8px;
+        margin-top: 6px;
+      }
+      button {
+        margin-top: 14px;
+        padding: 10px 12px;
+      }
+      .error {
+        color: #b00;
+        margin-top: 8px;
+      }
+      .info {
+        color: #060;
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <h3>Secure Login</h3>
+      <form id="loginForm" autocomplete="off">
+        <label
+          >Username
+          <input
+            id="username"
+            name="username"
+            type="text"
+            maxlength="100"
+            required
+          />
+        </label>
+        <label
+          >Password
+          <input
+            id="password"
+            name="password"
+            type="password"
+            maxlength="128"
+            required
+          />
+        </label>
+        <div><button type="submit">Submit</button></div>
+      </form>
+      <div id="msg" class=""></div>
+      <div id="profile" style="display: none">
+        <h4>Welcome</h4>
+        <div id="name"></div>
+        <button id="logoutBtn">Logout</button>
+      </div>
+    </div>
+
+    <script>
+      const API_URL = "/api.php";
+      const PUBLIC_KEY_URL = "/public.pem";
+      let SERVER_PUBLIC_PEM = null;
+
+      async function loadPublicKey() {
+        const r = await fetch(PUBLIC_KEY_URL);
+        return r.text();
+      }
+
+      async function init() {
+        SERVER_PUBLIC_PEM = await loadPublicKey();
+      }
+      init();
+
+      function validate(username, password) {
+        if (!username || username.length < 3)
+          return "Username must be at least 3 characters.";
+        if (!password || password.length < 8)
+          return "Password must be at least 8 characters.";
+        return null;
+      }
+
+      function pemToArrayBuffer(pem) {
+        const b64 = pem.replace(/-----.*?-----/g, "").replace(/\s+/g, "");
+        const bin = atob(b64);
+        const len = bin.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes.buffer;
+      }
+
+      async function importPublicKey(pem) {
+        const buf = pemToArrayBuffer(pem);
+        return await crypto.subtle.importKey(
+          "spki",
+          buf,
+          { name: "RSA-OAEP", hash: "SHA-1" },
+          false,
+          ["encrypt"]
+        );
+      }
+
+      async function encryptPayload(pubKey, obj) {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(JSON.stringify(obj));
+        const aesKey = await crypto.subtle.generateKey(
+          { name: "AES-GCM", length: 256 },
+          true,
+          ["encrypt", "decrypt"]
+        );
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const ct = await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv: iv },
+          aesKey,
+          data
+        );
+        const rawAes = await crypto.subtle.exportKey("raw", aesKey);
+        const encryptedAesKey = await crypto.subtle.encrypt(
+          { name: "RSA-OAEP" },
+          pubKey,
+          rawAes
+        );
+        function toB64(buf) {
+          return btoa(String.fromCharCode(...new Uint8Array(buf)));
+        }
+        const packet = {
+          key: toB64(encryptedAesKey),
+          iv: toB64(iv),
+          data: toB64(ct),
+        };
+        return btoa(JSON.stringify(packet));
+      }
+
+      function showMsg(text, klass = "error") {
+        const el = document.getElementById("msg");
+        el.className = klass;
+        el.textContent = text;
+      }
+
+      async function postEncrypted(action, payload) {
+        if (!SERVER_PUBLIC_PEM) {
+          showMsg("Public key not loaded yet", "error");
+          throw new Error("public key not loaded");
+        }
+        const pubKey = await importPublicKey(SERVER_PUBLIC_PEM);
+        const encrypted = await encryptPayload(pubKey, payload);
+        const body = new FormData();
+        body.append("action", action);
+        body.append("payload", encrypted);
+        const resp = await fetch(API_URL, {
+          method: "POST",
+          body: body,
+          credentials: "include",
+        });
+        return resp.json();
+      }
+
+      document
+        .getElementById("loginForm")
+        .addEventListener("submit", async (ev) => {
+          ev.preventDefault();
+          showMsg("", "");
+          const u = document.getElementById("username").value.trim();
+          const p = document.getElementById("password").value;
+          const v = validate(u, p);
+          if (v) {
+            showMsg(v, "error");
+            return;
+          }
+          try {
+            showMsg("Logging in...", "info");
+            const payload = {
+              username: u,
+              password: p,
+              ts: Date.now(),
+              nonce: Math.random().toString(36).slice(2),
+            };
+            const res = await postEncrypted("login", payload);
+            if (res.success) {
+              document.getElementById("profile").style.display = "block";
+              document.getElementById("name").textContent =
+                res.first_name + " " + res.last_name;
+              showMsg("Login successful", "info");
+              document.getElementById("loginForm").style.display = "none";
+            } else {
+              showMsg(res.message || "Login failed", "error");
+            }
+          } catch (e) {
+            console.error(e);
+            showMsg("Network or encryption error", "error");
+          }
+        });
+
+      document
+        .getElementById("logoutBtn")
+        .addEventListener("click", async () => {
+          try {
+            const body = new FormData();
+            body.append("action", "logout");
+            const resp = await fetch(API_URL, {
+              method: "POST",
+              body: body,
+              credentials: "include",
+            });
+            const j = await resp.json();
+            if (j.success) {
+              showMsg("Logged out", "info");
+              document.getElementById("profile").style.display = "none";
+              document.getElementById("name").textContent = "";
+              document.getElementById("loginForm").style.display = "block";
+            } else showMsg(j.message || "Logout failed", "error");
+          } catch (e) {
+            showMsg("Network error", "error");
+          }
+        });
+
+      (async () => {
+        try {
+          const body = new FormData();
+          body.append("action", "profile");
+          const resp = await fetch(API_URL, {
+            method: "POST",
+            body: body,
+            credentials: "include",
+          });
+          const j = await resp.json();
+          if (j.success) {
+            document.getElementById("profile").style.display = "block";
+            document.getElementById("name").textContent =
+              j.first_name + " " + j.last_name;
+            document.getElementById("loginForm").style.display = "none";
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </body>
+</html>
