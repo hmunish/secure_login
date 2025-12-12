@@ -10,7 +10,7 @@ Hybrid encryption demo: browser encrypts credentials using AES-GCM (random key),
 - api.php : backend
 - router.php : local router
 - public.pem : public key (place at project root)
-- private.pem : private key (place at project root, DO NOT COMMIT)
+- private.pem : private key (place at project root)
 - .env : config (copy from .env.example)
 - composer.json : dependencies
 - schema.sql : DB schema and test user
